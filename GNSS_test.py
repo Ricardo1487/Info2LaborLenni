@@ -1,11 +1,12 @@
 import os
 from dotenv import load_dotenv
-import psycopg2
+import psycopg
 from datetime import datetime
 import time
+from pathlib import Path
 
 # Load environment variables from .env
-load_dotenv()
+load_dotenv(Path.cwd() / ".env")
 
 # Configuration from .env
 DB_HOST     = os.getenv("DB_HOST")
@@ -18,16 +19,17 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 print("FAKE-GNSS-Modus aktiv – verwende Testdaten.")
 
 def connect_db():
-    """Connect to PostgreSQL using environment variables."""
+    """Connect to PostgreSQL using environment variables (psycopg v3)."""
     try:
-        return psycopg2.connect(
+        return psycopg.connect(
             host=DB_HOST,
             port=DB_PORT,
             dbname=DB_NAME,
             user=DB_USER,
-            password=DB_PASSWORD
+            password=DB_PASSWORD,
+            sslmode="require"  # SSL-Verbindung erzwingen
         )
-    except psycopg2.Error as err:
+    except psycopg.Error as err:
         print(f"Fehler bei Datenbankverbindung: {err}")
         return None
 

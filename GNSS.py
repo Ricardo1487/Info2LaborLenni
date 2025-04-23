@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
-load_dotenv()
-import psycopg2
+from pathlib import Path
+load_dotenv(dotenv_path=Path.cwd() / ".env")
+import psycopg  # psycopg v3
 from datetime import datetime
 import serial
 import time
@@ -61,11 +62,13 @@ def convert_to_decimal(raw, direction):
 # -------------------------
 # Hauptschleife
 # -------------------------
-db = psycopg2.connect(
+db = psycopg.connect(
     host=os.getenv("DB_HOST"),
+    port=os.getenv("DB_PORT", "5432"),
     dbname=os.getenv("DB_NAME"),
     user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD")
+    password=os.getenv("DB_PASSWORD"),
+    sslmode="require"  # SSL-Verbindung erzwingen
 )
 cursor = db.cursor()
 
@@ -90,9 +93,10 @@ while True:
         print("Beendet per Tastatur")
         break
     except Exception as e:
-        print(f"Fehler: {e}")
+        print(f"Datenbank‑/Verarbeitungsfehler: {e}")
         time.sleep(2)
 
-cursor.close()
-db.close()
-ser.close()
+finally:
+    cursor.close()
+    db.close()
+    ser.close()
