@@ -107,7 +107,6 @@ try:
                 else:
                     print("⚠️  Parsing fehlgeschlagen – keine Daten!")
 
-            time.sleep(1)
 
         except KeyboardInterrupt:
             print("\n🛑 GNSS-Logger beendet durch Tastatur")
