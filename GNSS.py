@@ -64,6 +64,7 @@ try:
     print("✅ GNSS-Sensor verbunden!")
 
     # Datenbank-Verbindung aufbauen
+    print(f"→  verbinde zu  {DB_NAME}@{DB_HOST}:{DB_PORT}  als {DB_USER}")
     db = psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -83,15 +84,19 @@ try:
                 data = parse_gpgga(line)
                 if data:
                     lat, lon, alt = data
-                    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                    cursor.execute("""
-                        INSERT INTO gnss_data (timestamp, latitude, longitude, altitude)
-                        VALUES (%s, %s, %s, %s)
-                    """, (timestamp, lat, lon, alt))
-                    db.commit()
-                    print(f"🌍 Gespeichert: {timestamp} → {lat}, {lon}, {alt} m")
-                else:
-                    print("🕓 Noch kein GPS-Fix erhalten...")
+                    timestamp = datetime.utcnow()  # besser echtes datetime-Objekt
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO gnss_data (timestamp, latitude, longitude, altitude)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (timestamp, lat, lon, alt)
+                        )
+                        db.commit()
+                        print(f"🌍 Gespeichert: {timestamp}  {lat}, {lon}, {alt} m")
+                    except Exception as e:
+                        print(f"⚠️  SQL-Fehler: {e}")
             time.sleep(1)
 
         except KeyboardInterrupt:
