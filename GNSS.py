@@ -81,7 +81,7 @@ try:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             print(f"Empfangen: {line}")
 
-            if '$GGA' in line:
+            if 'GGA' in line:
                 print("➡️  GGA-Zeile erkannt!")
 
                 data = parse_gpgga(line)
