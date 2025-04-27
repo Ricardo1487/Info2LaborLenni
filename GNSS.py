@@ -79,12 +79,18 @@ try:
     while True:
         try:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            print(f"Empfangen: {line}")  # Debug-Ausgabe hinzugefügt
+            print(f"Empfangen: {line}")
+
             if '$GGA' in line:
+                print("➡️  GGA-Zeile erkannt!")
+
                 data = parse_gpgga(line)
                 if data:
                     lat, lon, alt = data
-                    timestamp = datetime.utcnow()  # besser echtes datetime-Objekt
+                    timestamp = datetime.utcnow()
+
+                    print(f"🌍 Parsed erfolgreich: {lat}, {lon}, {alt} m")
+
                     try:
                         cursor.execute(
                             """
@@ -94,9 +100,13 @@ try:
                             (timestamp, lat, lon, alt)
                         )
                         db.commit()
-                        print(f"🌍 Gespeichert: {timestamp}  {lat}, {lon}, {alt} m")
-                    except Exception as e:
-                        print(f"⚠️  SQL-Fehler: {e}")
+                        print(f"✅ Gespeichert in DB: {timestamp}")
+                    except Exception as db_err:
+                        print(f"❌ Fehler beim Insert: {db_err}")
+
+                else:
+                    print("⚠️  Parsing fehlgeschlagen – keine Daten!")
+
             time.sleep(1)
 
         except KeyboardInterrupt:
@@ -104,7 +114,7 @@ try:
             break
 
         except Exception as e:
-            print(f"⚠️ Fehler während Datenbank-Update: {e}")
+            print(f"⚠️ Unerwarteter Fehler: {e}")
             time.sleep(2)
 
 finally:
