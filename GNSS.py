@@ -1,11 +1,15 @@
 import os
+import time
+import serial
 from dotenv import load_dotenv
 from pathlib import Path
-load_dotenv(dotenv_path=Path.cwd() / ".env")
-import psycopg  # psycopg v3
 from datetime import datetime
-import serial
-import time
+import psycopg2  # psycopg2
+
+# -------------------------
+# .env Datei laden
+# -------------------------
+load_dotenv(dotenv_path=Path.cwd() / ".env")
 
 # -------------------------
 # Konfiguration
@@ -13,18 +17,14 @@ import time
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/serial0")
 BAUD_RATE = int(os.getenv("BAUD_RATE", 9600))
 
-# -------------------------
-# GNSS-Verbindung aufbauen
-# -------------------------
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    print("GNSS-Sensor verbunden")
-except Exception as e:
-    print(f"Fehler beim Verbinden zum GNSS-Modul: {e}")
-    exit(1)
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 # -------------------------
-# NMEA-Zeile parsen ($GPGGA)
+# Funktionen
 # -------------------------
 def parse_gpgga(line):
     try:
@@ -32,7 +32,6 @@ def parse_gpgga(line):
         if len(parts) < 10:
             return None
 
-        # Umrechnen in Dezimalgrad
         lat_raw = parts[2]
         lat_dir = parts[3]
         lon_raw = parts[4]
@@ -46,9 +45,6 @@ def parse_gpgga(line):
     except:
         return None
 
-# -------------------------
-# Umrechnen NMEA -> Dezimalgrad
-# -------------------------
 def convert_to_decimal(raw, direction):
     if raw == '' or direction == '':
         return None
@@ -60,43 +56,60 @@ def convert_to_decimal(raw, direction):
     return decimal
 
 # -------------------------
-# Hauptschleife
+# Hauptprogramm
 # -------------------------
-db = psycopg.connect(
-    host=os.getenv("DB_HOST"),
-    port=os.getenv("DB_PORT", "5432"),
-    dbname=os.getenv("DB_NAME"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    sslmode="require"  # SSL-Verbindung erzwingen
-)
-cursor = db.cursor()
+try:
+    # GNSS-Verbindung öffnen
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print("✅ GNSS-Sensor verbunden!")
 
-while True:
-    try:
-        # FAKE-MODUS für Mac-Test ohne Hardware
-        line = ser.readline().decode('utf-8', errors='ignore').strip()
-        if line.startswith('$GPGGA'):
-            data = parse_gpgga(line)
-            if data:
-                lat, lon, alt = data
-                timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                cursor.execute("""
-                    INSERT INTO gps_data (timestamp, latitude, longitude, altitude)
-                    VALUES (%s, %s, %s, %s)
-                """, (timestamp, lat, lon, alt))
-                db.commit()
-                print(f"Gespeichert: {timestamp} → {lat}, {lon}, {alt} m")
-        time.sleep(1)
+    # Datenbank-Verbindung aufbauen
+    db = psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        sslmode="require"  # SSL erzwingen
+    )
+    cursor = db.cursor()
+    print("✅ Mit Datenbank verbunden!")
 
-    except KeyboardInterrupt:
-        print("Beendet per Tastatur")
-        break
-    except Exception as e:
-        print(f"Datenbank‑/Verarbeitungsfehler: {e}")
-        time.sleep(2)
+    while True:
+        try:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            print(f"Empfangen: {line}")  # Debug-Ausgabe hinzugefügt
+            if '$GGA' in line:
+                data = parse_gpgga(line)
+                if data:
+                    lat, lon, alt = data
+                    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    cursor.execute("""
+                        INSERT INTO gnss_data (timestamp, latitude, longitude, altitude)
+                        VALUES (%s, %s, %s, %s)
+                    """, (timestamp, lat, lon, alt))
+                    db.commit()
+                    print(f"🌍 Gespeichert: {timestamp} → {lat}, {lon}, {alt} m")
+                else:
+                    print("🕓 Noch kein GPS-Fix erhalten...")
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            print("\n🛑 GNSS-Logger beendet durch Tastatur")
+            break
+
+        except Exception as e:
+            print(f"⚠️ Fehler während Datenbank-Update: {e}")
+            time.sleep(2)
 
 finally:
-    cursor.close()
-    db.close()
-    ser.close()
+    print("\n📦 Aufräumen...")
+    try:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'db' in locals():
+            db.close()
+        if 'ser' in locals():
+            ser.close()
+    except Exception as e:
+        print(f"⚠️ Fehler beim Aufräumen: {e}")
