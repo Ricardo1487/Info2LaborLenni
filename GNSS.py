@@ -31,6 +31,19 @@ ser = db = cursor = None      # globale Handles
 # ---------------------------------------------------
 # DB-Reconnect
 # ---------------------------------------------------
+# ---------------------------------------------------
+# Helfer: sicherer Rollback, der keine Exceptions propagiert
+# ---------------------------------------------------
+def safe_rollback():
+    """Versucht einen DB‑Rollback, schluckt aber alle Fehler,
+    damit der eigentliche Fehlerpfad (Buffer schreiben) nicht unterbrochen wird."""
+    try:
+        if db and not db.closed:
+            db.rollback()
+            log.debug("🔄 DB rollback ausgeführt")
+    except Exception as e:
+        log.debug("⏭️  Rollback nicht möglich: %s", e)
+
 def connect_db():
     global db, cursor
     try:
@@ -70,6 +83,7 @@ def parse_gprmc(line):
 # Buffer-Funktionen
 # ---------------------------------------------------
 def save_to_buffer(ts, lat, lon, alt, spd):
+    log.debug("✏️  save_to_buffer called (lat=%s lon=%s alt=%s spd=%s)", lat, lon, alt, spd)
     if lat is None or lon is None:
         log.warning("⚠️  GNSS-Fix fehlt – Datensatz verworfen")
         return
@@ -106,7 +120,7 @@ def flush_buffer_to_db():
             success += 1
         except Exception as e:
             log.error("❌ Flush-Fehler %s  %s", r, e)
-            db.rollback()
+            safe_rollback()
             remaining.append(r)
 
     if success:
@@ -161,7 +175,7 @@ if __name__=="__main__":
                     flush_buffer_to_db()
                 except Exception as e:
                     log.error("❌ Insert-Fehler: %s", e)
-                    db.rollback()
+                    safe_rollback()
                     save_to_buffer(ts, lat, lon, alt, spd)
                     connect_db()
 
