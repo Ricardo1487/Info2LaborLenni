@@ -137,11 +137,17 @@ def flush_buffer_to_db():
             alt = float(r[3]) if r[3] else None
             spd = float(r[4]) if r[4] else None
             cursor.execute(
-                "INSERT INTO gnss_data "
-                "(timestamp,latitude,longitude,altitude,speed)"
-                "VALUES (%s,%s,%s,%s,%s)",
+                """
+                INSERT INTO gnss_data (timestamp, latitude, longitude, altitude, speed)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (timestamp) DO NOTHING
+                """,
                 (ts, lat, lon, alt, spd))
-            success += 1
+            # success nur erhöhen, wenn tatsächlich eingefügt wurde
+            if cursor.rowcount:
+                success += 1
+            else:
+                log.debug("⏭️  Duplikat übersprungen: %s", ts)
         except Exception as e:
             log.error("❌ Flush-Fehler %s  %s", r, e)
             safe_rollback()
