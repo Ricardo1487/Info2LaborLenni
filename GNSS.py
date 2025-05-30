@@ -57,10 +57,13 @@ def parse_gpgga(line: str):
         return None
     lat = convert_to_decimal(parts[2], parts[3])
     lon = convert_to_decimal(parts[4], parts[5])
-    try:
-        alt = float(parts[9])
-    except ValueError:
-        alt = None
+    # Höhenangabe (kann leer sein)
+    alt = None
+    if len(parts) > 9 and parts[9]:
+        try:
+            alt = float(parts[9])
+        except ValueError:
+            pass
     return lat, lon, alt
 
 def parse_gprmc(line: str):
@@ -76,7 +79,13 @@ def save_to_buffer(timestamp, lat, lon, alt, speed):
     with os.fdopen(fd, "w", newline="") as f_tmp:
         writer = csv.writer(f_tmp)
         # neue Zeile an den Anfang
-        writer.writerow([timestamp.isoformat(), lat, lon, alt, speed])
+        writer.writerow([
+            timestamp.isoformat(),
+            lat if lat is not None else "",
+            lon if lon is not None else "",
+            alt if alt is not None else "",
+            speed if speed is not None else ""
+        ])
         # vorhandene Zeilen anhängen
         if os.path.exists(BUFFER_FILE):
             with open(BUFFER_FILE, "r", newline="") as f_old:
@@ -107,8 +116,8 @@ def flush_buffer_to_db(cursor, db):
                     row[0],                # ISO-String
                     float(row[1]),
                     float(row[2]),
-                    float(row[3]),
-                    float(row[4]),
+                    float(row[3]) if row[3] not in ("", "None") else None,
+                    float(row[4]) if row[4] not in ("", "None") else None,
                 )
             )
         except Exception as e:
