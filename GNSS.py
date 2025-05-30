@@ -2,7 +2,27 @@
 import os, time, serial, csv, tempfile, psycopg2, logging
 from dotenv import load_dotenv
 from pathlib import Path
+
 from datetime import datetime
+
+# ---------------------------------------------------
+# Online‑Check (leichter UDP‑Ping)
+# ---------------------------------------------------
+PING_HOST   = os.getenv("PING_HOST", "8.8.8.8")   # öffentlicher DNS‑Server (Google)
+PING_PORT   = int(os.getenv("PING_PORT", "53"))   # beliebiger UDP‑Port
+PING_TIMEOUT = int(os.getenv("PING_TIMEOUT", "3"))
+
+def is_online(host: str = PING_HOST, port: int = PING_PORT, timeout: int = PING_TIMEOUT) -> bool:
+    """Prüft per leichtgewichtigem UDP‑Ping, ob ein Uplink ins Internet besteht.
+    Verhindert unnötige (und langsame) Verbindungsversuche zur Datenbank,
+    wenn überhaupt keine Konnektivität vorhanden ist."""
+    import socket
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM).connect((host, port))
+        return True
+    except OSError:
+        return False
 
 # ---------------------------------------------------
 # Logging
@@ -46,6 +66,10 @@ def safe_rollback():
 
 def connect_db():
     global db, cursor
+    # Erst prüfen, ob überhaupt ein Uplink existiert
+    if not is_online():
+        log.info("🌐 Offline – DB‑Connect übersprungen")
+        return
     try:
         if db: db.close()
     except Exception:
@@ -124,8 +148,13 @@ def flush_buffer_to_db():
             remaining.append(r)
 
     if success:
-        db.commit()
-        log.info("✅ Flush OK – %d rows", success)
+        try:
+            db.commit()
+            log.info("✅ Flush OK – %d rows", success)
+        except Exception as e:
+            log.error("❌ Commit‑Fehler: %s", e)
+            safe_rollback()
+            remaining = rows  # nichts löschen, alles bleibt gepuffert
 
     with open(BUFFER_FILE,"w",newline="") as f:
         csv.writer(f).writerows(remaining)
