@@ -1,236 +1,203 @@
 #!/usr/bin/env python3
-import os
-import time
-import serial
-import csv
-import tempfile
+import os, time, serial, csv, tempfile, psycopg2, logging
 from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime
-import psycopg2
 
-# -------------------------
-# Globale Variablen
-# -------------------------
-ser = None
-db = None
-cursor = None
+# ---------------------------------------------------
+# Logging konfigurieren
+# ---------------------------------------------------
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s  %(message)s",
+    level=logging.INFO,            # DEBUG für noch mehr Details
+    datefmt="%H:%M:%S")
+log = logging.getLogger(__name__)
 
-# -------------------------
-# .env laden & prüfen
-# -------------------------
-env_path = Path.cwd() / ".env"
-if not env_path.exists():
-    raise FileNotFoundError(f".env file not found at {env_path}")
-load_dotenv(dotenv_path=env_path)
+# ---------------------------------------------------
+# Umgebungsvariablen laden
+# ---------------------------------------------------
+load_dotenv(Path.cwd() / ".env")
 
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/serial0")
 BAUD_RATE   = int(os.getenv("BAUD_RATE", "9600"))
 BUFFER_FILE = "buffer.csv"
 
-DB_HOST     = os.getenv("DB_HOST")
-DB_PORT     = os.getenv("DB_PORT", "5432")
-DB_NAME     = os.getenv("DB_NAME")
-DB_USER     = os.getenv("DB_USER")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-for var in ("DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"):
-    if not globals()[var]:
-        raise RuntimeError(f"Environment variable {var} is not set in .env")
+# ---------------------------------------------------
+# Globale Handles
+# ---------------------------------------------------
+ser = db = cursor = None
 
-# -------------------------
+# ---------------------------------------------------
 # Hilfsfunktionen
-# -------------------------
-def convert_to_decimal(raw: str, direction: str):
-    if not raw or not direction:
-        return None
-    deg  = int(float(raw) / 100)
-    minu = float(raw) - deg * 100
-    dec  = deg + minu / 60.0
-    if direction in ("S", "W"):
-        dec = -dec
-    return dec
+# ---------------------------------------------------
+def connect_db():
+    """(Re)connect und sofortigen Buffer-Flush ausführen."""
+    global db, cursor
+    try:
+        if db:
+            db.close()
+    except Exception:
+        pass
 
-def parse_gpgga(line: str):
-    parts = line.split(",")
-    if len(parts) < 10:
-        return None
-    lat = convert_to_decimal(parts[2], parts[3])
-    lon = convert_to_decimal(parts[4], parts[5])
-    # Höhenangabe (kann leer sein)
-    alt = None
-    if len(parts) > 9 and parts[9]:
-        try:
-            alt = float(parts[9])
-        except ValueError:
-            pass
-    return lat, lon, alt
+    db = psycopg2.connect(
+        host=DB_HOST, port=DB_PORT,
+        dbname=DB_NAME, user=DB_USER,
+        password=DB_PASSWORD, sslmode="require")
+    cursor = db.cursor()
+    log.info("🔄 (Re)connected to DB")
+    flush_buffer_to_db()
 
-def parse_gprmc(line: str):
-    parts = line.split(",")
-    if len(parts) < 8 or not parts[7]:
+def convert_to_decimal(raw, d):
+    if not raw or not d:
         return None
-    speed_kn = float(parts[7])
-    return speed_kn * 1.852  # Knoten → km/h
+    deg = int(float(raw) // 100)
+    dec = deg + (float(raw) - deg * 100) / 60
+    return -dec if d in ("S", "W") else dec
 
-def save_to_buffer(timestamp, lat, lon, alt, speed):
-    # Atomar: erst in Temp, dann ersetzen
-    fd, tmp_path = tempfile.mkstemp(dir=".", prefix=BUFFER_FILE, text=True)
-    with os.fdopen(fd, "w", newline="") as f_tmp:
-        writer = csv.writer(f_tmp)
-        # neue Zeile an den Anfang
-        writer.writerow([
-            timestamp.isoformat(),
-            lat if lat is not None else "",
-            lon if lon is not None else "",
-            alt if alt is not None else "",
-            speed if speed is not None else ""
-        ])
-        # vorhandene Zeilen anhängen
+def parse_gpgga(line):
+    p = line.split(',')
+    if len(p) < 10:
+        return None
+    return (
+        convert_to_decimal(p[2], p[3]),
+        convert_to_decimal(p[4], p[5]),
+        float(p[9]) if p[9] else None
+    )
+
+def parse_gprmc(line):
+    p = line.split(',')
+    return float(p[7]) * 1.852 if len(p) > 7 and p[7] else None
+
+def save_to_buffer(ts, lat, lon, alt, spd):
+    if lat is None or lon is None:
+        log.warning("⚠️  GNSS-Fix fehlt – Zeile verworfen")
+        return
+
+    fd, tmp = tempfile.mkstemp(dir=".", prefix=BUFFER_FILE, text=True)
+    with os.fdopen(fd, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([ts.isoformat(), lat, lon, alt or "", spd or ""])
         if os.path.exists(BUFFER_FILE):
-            with open(BUFFER_FILE, "r", newline="") as f_old:
-                for row in f_old:
-                    f_tmp.write(row)
-    os.replace(tmp_path, BUFFER_FILE)
-    print("💾 Gespeichert im Puffer (Offline-Modus)")
+            with open(BUFFER_FILE, "r", newline="") as old:
+                for row in old:
+                    f.write(row)
+    os.replace(tmp, BUFFER_FILE)
+    log.info("💾 Buffer-Write %s  lat=%.6f lon=%.6f", ts.isoformat(), lat, lon)
 
-def flush_buffer_to_db(cursor, db):
+def flush_buffer_to_db():
     if not os.path.exists(BUFFER_FILE):
         return
     rows = list(csv.reader(open(BUFFER_FILE, "r", newline="")))
     if not rows:
         return
 
-    success_count = 0
-    remaining = []
-
-    for row in rows:
+    success, remaining = 0, []
+    for r in rows:
         try:
+            ts  = r[0]
+            lat = float(r[1]) if r[1] else None
+            lon = float(r[2]) if r[2] else None
+            alt = float(r[3]) if r[3] else None
+            spd = float(r[4]) if r[4] else None
+
+            if lat is None or lon is None:
+                log.warning("⚠️  Überspringe unvollst. Row %s", r)
+                continue
+
             cursor.execute(
-                """
-                INSERT INTO gnss_data
-                  (timestamp, latitude, longitude, altitude, speed)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    row[0],                # ISO-String
-                    float(row[1]),
-                    float(row[2]),
-                    float(row[3]) if row[3] not in ("", "None") else None,
-                    float(row[4]) if row[4] not in ("", "None") else None,
-                )
-            )
+                "INSERT INTO gnss_data (timestamp,latitude,longitude,altitude,speed) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (ts, lat, lon, alt, spd))
+            success += 1
+
         except Exception as e:
-            print(f"❌ Nachtrag-Fehler bei {row}: {e} – überspringe")
-            remaining.append(row)
-        else:
-            success_count += 1
+            log.error("❌ Flush-Fehler %s  %s", r, e)
+            db.rollback()
+            remaining.append(r)
 
-    if success_count > 0:
+    if success:
         db.commit()
-        # Puffer nur mit nicht erfolgreichen Zeilen neu schreiben
-        with open(BUFFER_FILE, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerows(remaining)
-        print(f"✅ {success_count} gepufferte Datensätze nachgetragen; {len(remaining)} verbleiben.")
+        log.info("✅ Flush OK – %d rows", success)
 
-def connect_db():
-    global db, cursor
-    try:
-        if db:
-            db.close()
-    except:
-        pass
-    db = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD, sslmode="require"
-    )
-    cursor = db.cursor()
-    print("🔄 (Re)connected to DB")
-    flush_buffer_to_db(cursor, db)
+    with open(BUFFER_FILE, "w", newline="") as f:
+        csv.writer(f).writerows(remaining)
+    log.info("📦 Buffer verbleibend: %d Zeilen", len(remaining))
 
-# -------------------------
-# Hauptprogramm
-# -------------------------
+# ---------------------------------------------------
+# Hauptloop
+# ---------------------------------------------------
 if __name__ == "__main__":
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    log.info("✅ GNSS-Sensor verbunden!")
+    connect_db()
+
     last_speed = None
     last_flush = time.time()
 
     try:
-        # Sensor & DB öffnen
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        print("✅ GNSS-Sensor verbunden!")
-        connect_db()
-
-        # Daten einlesen
         while True:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
+            line = ser.readline().decode('utf-8', 'ignore').strip()
             if not line:
                 continue
 
-            print(f"Empfangen: {line}")
-            header = line.split(",")[0]
-            print(f"[DEBUG] Header = {header}")
+            hdr = line.split(',')[0]
 
-            # Geschwindigkeit
-            if header in ("$GPRMC", "$GNRMC"):
-                speed = parse_gprmc(line)
-                if speed is not None:
-                    last_speed = speed
-                    print(f"🚀 Speed aktualisiert: {last_speed:.2f} km/h")
+            # --- Geschwindigkeit -------------------------------------------------
+            if hdr in ("$GPRMC", "$GNRMC"):
+                sp = parse_gprmc(line)
+                if sp is not None:
+                    last_speed = sp
+                    log.info("🚀 Speed %.2f km/h", sp)
                 continue
 
-            # Position
-            if header.endswith("GGA"):
-                print("➡️ GGA-Zeile erkannt!")
+            # --- Position --------------------------------------------------------
+            if hdr.endswith("GGA"):
                 data = parse_gpgga(line)
                 if not data:
-                    print("⚠️ Parsing fehlgeschlagen")
                     continue
                 lat, lon, alt = data
                 ts = datetime.utcnow()
-                speed = last_speed if last_speed is not None else 0.0
-                print(f"🌍 Parsed: {lat}, {lon}, {alt} m  🚀 {speed:.2f} km/h")
+                sp = last_speed or 0.0
 
                 try:
-                    # sicherstellen, dass DB verbunden ist
-                    if cursor is None or cursor.closed or db.closed:
+                    if not cursor or cursor.closed or db.closed:
                         connect_db()
-                    cursor.execute(
-                        """
-                        INSERT INTO gnss_data
-                          (timestamp, latitude, longitude, altitude, speed)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (ts.isoformat(), lat, lon, alt, speed)
-                    )
-                    db.commit()
-                    print(f"✅ Gespeichert in DB: {ts.isoformat()}")
-                    flush_buffer_to_db(cursor, db)
 
-                except Exception as db_err:
-                    print(f"❌ Insert-Fehler: {db_err}")
-                    save_to_buffer(ts, lat, lon, alt, speed)
-                    # DB neu verbinden für nächsten Versuch
+                    cursor.execute(
+                        "INSERT INTO gnss_data (timestamp,latitude,longitude,altitude,speed) "
+                        "VALUES (%s,%s,%s,%s,%s)",
+                        (ts.isoformat(), lat, lon, alt, sp))
+                    db.commit()
+
+                    log.info("✅ Live-Insert %s", ts.isoformat())
+                    flush_buffer_to_db()
+
+                except Exception as e:
+                    log.error("❌ Insert-Fehler: %s", e)
+                    db.rollback()
+                    save_to_buffer(ts, lat, lon, alt, sp)
                     connect_db()
 
-            # Periodischer Flush
+            # --- Periodischer Flush ---------------------------------------------
             if time.time() - last_flush >= 30:
-                if cursor and not cursor.closed:
-                    flush_buffer_to_db(cursor, db)
+                log.debug("⏳ Periodischer Flush-Tick")
+                try:
+                    cursor.execute("SELECT 1")
+                    flush_buffer_to_db()
+                except Exception:
+                    connect_db()
                 last_flush = time.time()
 
     except KeyboardInterrupt:
-        print("\n🛑 GNSS-Logger beendet durch Tastatur")
-
-    except Exception as e:
-        print(f"⚠️ Unerwarteter Fehler: {e}")
+        log.info("🛑 Logger beendet per Tastatur")
 
     finally:
-        print("\n📦 Aufräumen…")
-        if ser is not None:
-            ser.close()
-        if cursor is not None:
-            cursor.close()
-        if db is not None:
-            db.close()
+        if ser:    ser.close()
+        if cursor: cursor.close()
+        if db:     db.close()
